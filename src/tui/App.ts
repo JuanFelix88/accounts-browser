@@ -1,7 +1,12 @@
 import blessed from "blessed";
 import { execSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import archiver from "archiver";
+import AdmZip from "adm-zip";
 import { CredentialStore } from "../credentials";
 import { launchBrowser } from "../browser";
+import { getCredsPath, getDataDir } from "../config";
 import type { Credential, CredentialStatus } from "../types";
 import { STATUSES } from "../types";
 
@@ -98,7 +103,7 @@ export class App {
       width: "100%",
       height: 3,
       content:
-        " {bold}F1{/bold}:Add  {bold}F2{/bold}:Edit  {bold}F3{/bold}:Status  {bold}F4{/bold}:Copy  {bold}DEL{/bold}:Delete  {bold}ENTER{/bold}:Launch  {bold}q{/bold}:Quit",
+        " {bold}F1{/bold}:Add {bold}F2{/bold}:Edit {bold}F3{/bold}:Status {bold}F4{/bold}:Copy {bold}F8{/bold}:Import {bold}F10{/bold}:Export {bold}DEL{/bold}:Del {bold}Enter{/bold}:Launch {bold}q{/bold}:Quit",
       tags: true,
       style: { fg: "white", bg: "gray" },
       border: { type: "line" },
@@ -218,6 +223,16 @@ export class App {
     this.table.key(["enter"], () => {
       if (this.modalOpen) return;
       this.handleLaunchBrowser();
+    });
+
+    this.screen.key(["f8"], () => {
+      if (this.modalOpen) return;
+      this.handleImport();
+    });
+
+    this.screen.key(["f10"], () => {
+      if (this.modalOpen) return;
+      this.handleExport();
     });
 
     this.table.focus();
@@ -733,6 +748,518 @@ export class App {
       this.runningBrowsers.delete(cred.id);
       this.refresh();
       this.showMessage(`{red-fg}Launch failed: ${msg}{/red-fg}`, 5000);
+    }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  FILE BROWSER DIALOG                                               */
+  /* ------------------------------------------------------------------ */
+
+  private showFileBrowser(
+    mode: "save" | "open",
+    options: {
+      title?: string;
+      defaultDir?: string;
+      defaultFilename?: string;
+      filter?: string;
+    },
+    callback: (filePath: string | null) => void,
+  ): void {
+    this.modalOpen = true;
+
+    let currentDir = path.resolve(options.defaultDir || process.cwd());
+    let entries: { name: string; isDir: boolean }[] = [];
+
+    const modal = blessed.box({
+      parent: this.screen,
+      top: "center",
+      left: "center",
+      width: "80%",
+      height: "80%",
+      border: { type: "line" },
+      label: ` ${options.title || (mode === "save" ? "Save As" : "Open File")} `,
+      tags: true,
+      style: { border: { fg: "cyan" }, bg: "black" },
+      shadow: true,
+    });
+
+    const pathBox = blessed.box({
+      parent: modal,
+      top: 0,
+      left: 1,
+      width: "100%-4",
+      height: 1,
+      tags: true,
+      style: { fg: "yellow", bg: "black" },
+    });
+
+    const fileList = blessed.list({
+      parent: modal,
+      top: 2,
+      left: 1,
+      width: "100%-4",
+      height: mode === "save" ? "100%-8" : "100%-5",
+      keys: true,
+      vi: false,
+      mouse: true,
+      tags: true,
+      style: {
+        selected: { fg: "black", bg: "cyan" },
+        item: { fg: "white" },
+      },
+      scrollbar: { ch: "\u2588", style: { bg: "cyan" } },
+    });
+
+    let filenameInput: blessed.Widgets.TextboxElement | null = null;
+    if (mode === "save") {
+      blessed.box({
+        parent: modal,
+        bottom: 3,
+        left: 1,
+        width: 10,
+        height: 1,
+        content: "Filename:",
+        style: { fg: "white", bg: "black" },
+      });
+
+      filenameInput = blessed.textbox({
+        parent: modal,
+        bottom: 3,
+        left: 12,
+        width: "100%-16",
+        height: 1,
+        inputOnFocus: true,
+        style: { fg: "white", bg: "gray", focus: { bg: "blue" } },
+      } as blessed.Widgets.TextboxOptions);
+
+      if (options.defaultFilename) {
+        filenameInput.setValue(options.defaultFilename);
+      }
+    }
+
+    blessed.box({
+      parent: modal,
+      bottom: 1,
+      left: 1,
+      width: "100%-4",
+      height: 1,
+      content:
+        mode === "save"
+          ? "{gray-fg}Enter:Open Dir | Tab:Filename | Esc:Cancel{/gray-fg}"
+          : "{gray-fg}Enter:Open Dir/Select File | Esc:Cancel{/gray-fg}",
+      tags: true,
+      style: { bg: "black" },
+    });
+
+    let closed = false;
+
+    const closeModal = () => {
+      if (closed) return;
+      closed = true;
+      this.modalOpen = false;
+      modal.destroy();
+      this.table.focus();
+      this.screen.render();
+    };
+
+    const loadDir = (dirPath: string) => {
+      try {
+        const raw = fs.readdirSync(dirPath, { withFileTypes: true });
+        entries = [{ name: "..", isDir: true }];
+
+        const dirs = raw
+          .filter((e) => e.isDirectory())
+          .sort((a, b) => a.name.localeCompare(b.name));
+        const files = raw
+          .filter((e) => e.isFile())
+          .sort((a, b) => a.name.localeCompare(b.name));
+
+        dirs.forEach((d) => entries.push({ name: d.name, isDir: true }));
+
+        if (mode === "open" && options.filter) {
+          files
+            .filter((f) => f.name.toLowerCase().endsWith(options.filter!))
+            .forEach((f) => entries.push({ name: f.name, isDir: false }));
+        } else {
+          files.forEach((f) => entries.push({ name: f.name, isDir: false }));
+        }
+
+        currentDir = path.resolve(dirPath);
+        pathBox.setContent(`{yellow-fg}${currentDir}{/yellow-fg}`);
+        fileList.setItems(
+          entries.map((e) =>
+            e.name === ".."
+              ? "  {yellow-fg}<- ..{/yellow-fg}"
+              : e.isDir
+                ? `  {cyan-fg}[DIR]{/cyan-fg}  ${e.name}`
+                : `         ${e.name}`,
+          ),
+        );
+        fileList.select(0);
+        this.screen.render();
+      } catch {
+        // Permission denied — stay in current dir
+      }
+    };
+
+    fileList.key(["enter"], () => {
+      if (closed) return;
+      const sel = (fileList as any).selected as number;
+      const entry = entries[sel];
+      if (!entry) return;
+
+      if (entry.isDir) {
+        const newDir =
+          entry.name === ".."
+            ? path.dirname(currentDir)
+            : path.join(currentDir, entry.name);
+        loadDir(newDir);
+      } else if (mode === "open") {
+        const fullPath = path.join(currentDir, entry.name);
+        closeModal();
+        callback(fullPath);
+      } else if (mode === "save" && filenameInput) {
+        filenameInput.setValue(entry.name);
+        filenameInput.focus();
+        this.screen.render();
+      }
+    });
+
+    fileList.key(["escape"], () => {
+      closeModal();
+      callback(null);
+    });
+
+    if (mode === "save" && filenameInput) {
+      let navigating = false;
+
+      fileList.key(["tab"], () => {
+        if (closed) return;
+        filenameInput!.focus();
+        this.screen.render();
+      });
+
+      filenameInput.on("submit", (value: string) => {
+        if (navigating || closed) return;
+        const filename = value.trim();
+        if (!filename) return;
+        const fullPath = path.join(currentDir, filename);
+        closeModal();
+        callback(fullPath);
+      });
+
+      filenameInput.on("cancel", () => {
+        if (navigating) return;
+        closeModal();
+        callback(null);
+      });
+
+      filenameInput.key(["tab"], () => {
+        navigating = true;
+        filenameInput!.cancel();
+        navigating = false;
+        const val = filenameInput!.getValue();
+        if (val.includes("\t")) {
+          filenameInput!.setValue(val.replace(/\t/g, ""));
+        }
+        fileList.focus();
+        this.screen.render();
+      });
+    }
+
+    loadDir(currentDir);
+    fileList.focus();
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  PROGRESS DIALOG                                                   */
+  /* ------------------------------------------------------------------ */
+
+  private showProgressDialog(title: string): {
+    update: (percent: number, text: string) => void;
+    close: () => void;
+  } {
+    const modal = blessed.box({
+      parent: this.screen,
+      top: "center",
+      left: "center",
+      width: 60,
+      height: 9,
+      border: { type: "line" },
+      label: ` ${title} `,
+      tags: true,
+      style: { border: { fg: "cyan" }, bg: "black" },
+      shadow: true,
+    });
+
+    const statusText = blessed.box({
+      parent: modal,
+      top: 1,
+      left: 2,
+      width: "100%-6",
+      height: 1,
+      content: "Preparing...",
+      tags: true,
+      style: { fg: "white", bg: "black" },
+    });
+
+    const progressBox = blessed.box({
+      parent: modal,
+      top: 3,
+      left: 2,
+      width: "100%-6",
+      height: 1,
+      tags: true,
+      style: { bg: "black" },
+    });
+
+    const percentText = blessed.box({
+      parent: modal,
+      top: 5,
+      left: 2,
+      width: "100%-6",
+      height: 1,
+      content: "{center}0%{/center}",
+      tags: true,
+      style: { fg: "white", bg: "black" },
+    });
+
+    this.screen.render();
+
+    return {
+      update: (percent: number, text: string) => {
+        const p = Math.min(100, Math.max(0, Math.round(percent)));
+        statusText.setContent(text);
+        const barWidth = 52;
+        const filled = Math.round((barWidth * p) / 100);
+        const empty = barWidth - filled;
+        progressBox.setContent(
+          `{green-fg}${"\u2588".repeat(filled)}{/green-fg}{gray-fg}${"\u2591".repeat(empty)}{/gray-fg}`,
+        );
+        percentText.setContent(`{center}${p}%{/center}`);
+        this.screen.render();
+      },
+      close: () => {
+        modal.destroy();
+        this.screen.render();
+      },
+    };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  EXPORT (F10)                                                      */
+  /* ------------------------------------------------------------------ */
+
+  private handleExport(): void {
+    const now = new Date();
+    const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    const defaultFilename = `accounts-backup-${dateStr}.zip`;
+
+    this.showFileBrowser(
+      "save",
+      { title: "Export: Choose Location", defaultFilename },
+      async (filePath) => {
+        if (!filePath) return;
+        if (!filePath.toLowerCase().endsWith(".zip")) filePath += ".zip";
+
+        this.modalOpen = true;
+        const progress = this.showProgressDialog("Exporting");
+
+        try {
+          const credsPath = getCredsPath();
+          const dataDir = getDataDir();
+
+          let totalFiles = 0;
+          if (fs.existsSync(credsPath)) totalFiles++;
+          if (fs.existsSync(dataDir)) {
+            const count = (dir: string): number => {
+              let n = 0;
+              for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+                n += ent.isDirectory() ? count(path.join(dir, ent.name)) : 1;
+              }
+              return n;
+            };
+            totalFiles += count(dataDir);
+          }
+
+          if (totalFiles === 0) {
+            progress.close();
+            this.modalOpen = false;
+            this.table.focus();
+            this.showMessage("{yellow-fg}No data to export.{/yellow-fg}");
+            return;
+          }
+
+          progress.update(0, "Creating archive...");
+
+          const output = fs.createWriteStream(filePath);
+          const archive = archiver("zip", { zlib: { level: 9 } });
+          let processed = 0;
+
+          archive.on("entry", () => {
+            processed++;
+            const pct = Math.round((processed / totalFiles) * 100);
+            progress.update(pct, `Compressing... (${processed}/${totalFiles})`);
+          });
+
+          await new Promise<void>((resolve, reject) => {
+            output.on("close", resolve);
+            archive.on("error", reject);
+            archive.on("warning", (err) => {
+              if (err.code !== "ENOENT") reject(err);
+            });
+
+            archive.pipe(output);
+
+            if (fs.existsSync(credsPath)) {
+              archive.file(credsPath, { name: "creds.json" });
+            }
+            if (fs.existsSync(dataDir)) {
+              archive.directory(dataDir, "data");
+            }
+
+            archive.finalize();
+          });
+
+          progress.update(100, "Export complete!");
+          await new Promise((r) => setTimeout(r, 1000));
+          progress.close();
+          this.modalOpen = false;
+          this.table.focus();
+          this.showMessage(
+            `{green-fg}Exported to ${path.basename(filePath)}{/green-fg}`,
+          );
+        } catch (err) {
+          progress.close();
+          this.modalOpen = false;
+          this.table.focus();
+          const msg = err instanceof Error ? err.message : String(err);
+          this.showMessage(`{red-fg}Export failed: ${msg}{/red-fg}`, 5000);
+        }
+      },
+    );
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  IMPORT (F8)                                                       */
+  /* ------------------------------------------------------------------ */
+
+  private handleImport(): void {
+    this.showFileBrowser(
+      "open",
+      { title: "Import: Select ZIP File", filter: ".zip" },
+      (filePath) => {
+        if (!filePath) return;
+        this.showImportConfirm(filePath);
+      },
+    );
+  }
+
+  private showImportConfirm(zipPath: string): void {
+    this.modalOpen = true;
+
+    const modal = blessed.box({
+      parent: this.screen,
+      top: "center",
+      left: "center",
+      width: 58,
+      height: 9,
+      border: { type: "line" },
+      label: " Confirm Import ",
+      content:
+        `\n  Import from:\n  {bold}${path.basename(zipPath)}{/bold}\n\n` +
+        `  {yellow-fg}This will overwrite current credentials and data.{/yellow-fg}\n\n` +
+        `  {green-fg}Y{/green-fg}: Confirm    {red-fg}N / Esc{/red-fg}: Cancel`,
+      tags: true,
+      style: { border: { fg: "yellow" }, bg: "black" },
+      shadow: true,
+    });
+
+    modal.key(["y"], () => {
+      modal.destroy();
+      this.screen.render();
+      this.performImport(zipPath);
+    });
+
+    modal.key(["n", "escape"], () => {
+      this.modalOpen = false;
+      modal.destroy();
+      this.table.focus();
+      this.screen.render();
+    });
+
+    modal.focus();
+    this.screen.render();
+  }
+
+  private async performImport(zipPath: string): Promise<void> {
+    const progress = this.showProgressDialog("Importing");
+
+    try {
+      progress.update(0, "Reading ZIP file...");
+
+      const zip = new AdmZip(zipPath);
+      const zipEntries = zip.getEntries();
+      const total = zipEntries.length;
+
+      if (total === 0) {
+        progress.close();
+        this.modalOpen = false;
+        this.table.focus();
+        this.showMessage("{yellow-fg}ZIP file is empty.{/yellow-fg}");
+        return;
+      }
+
+      const hasCreds = zipEntries.some((e) => e.entryName === "creds.json");
+      if (!hasCreds) {
+        progress.close();
+        this.modalOpen = false;
+        this.table.focus();
+        this.showMessage(
+          "{red-fg}Invalid backup: creds.json not found in ZIP.{/red-fg}",
+        );
+        return;
+      }
+
+      const credsPath = getCredsPath();
+      const dataDir = getDataDir();
+      let processed = 0;
+
+      for (const entry of zipEntries) {
+        processed++;
+        progress.update(
+          Math.round((processed / total) * 100),
+          `Extracting... (${processed}/${total})`,
+        );
+
+        if (entry.isDirectory) continue;
+
+        if (entry.entryName === "creds.json") {
+          fs.writeFileSync(credsPath, entry.getData());
+        } else if (entry.entryName.startsWith("data/")) {
+          const rel = entry.entryName.substring(5);
+          if (rel) {
+            const target = path.join(dataDir, rel);
+            fs.mkdirSync(path.dirname(target), { recursive: true });
+            fs.writeFileSync(target, entry.getData());
+          }
+        }
+      }
+
+      progress.update(100, "Import complete!");
+      await new Promise((r) => setTimeout(r, 1000));
+      progress.close();
+      this.modalOpen = false;
+      this.store = new CredentialStore();
+      this.refresh();
+      this.table.focus();
+      this.showMessage("{green-fg}Import completed successfully!{/green-fg}");
+    } catch (err) {
+      progress.close();
+      this.modalOpen = false;
+      this.table.focus();
+      const msg = err instanceof Error ? err.message : String(err);
+      this.showMessage(`{red-fg}Import failed: ${msg}{/red-fg}`, 5000);
     }
   }
 
