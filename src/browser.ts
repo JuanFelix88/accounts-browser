@@ -21,7 +21,13 @@ export async function launchBrowser(
       userDataDir: profileDir,
     },
     turnstile: true,
-    args: ["--start-maximized"],
+    args: [
+      "--start-maximized",
+      // Disable OS-level cookie/secret encryption so profiles are portable across machines
+      "--disable-features=LockProfileCookieDatabase",
+      "--password-store=basic",
+      "--use-mock-keychain",
+    ],
   });
 
   // Set viewport to match the window size
