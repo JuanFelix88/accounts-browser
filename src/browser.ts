@@ -9,7 +9,9 @@ export async function launchBrowser(
   onDisconnected?: () => void,
 ): Promise<void> {
   const dataDir = getDataDir();
-  const profileDir = path.join(dataDir, credential.id);
+  // MUST be absolute — chrome-launcher starts Chrome with its own cwd,
+  // so a relative path resolves relative to the Chrome executable, not our app.
+  const profileDir = path.resolve(dataDir, credential.id);
 
   if (!fs.existsSync(profileDir)) {
     fs.mkdirSync(profileDir, { recursive: true });
@@ -22,11 +24,14 @@ export async function launchBrowser(
     },
     turnstile: true,
     args: [
-      "--start-maximized",
-      // Disable OS-level cookie/secret encryption so profiles are portable across machines
-      "--disable-features=LockProfileCookieDatabase",
-      "--password-store=basic",
-      "--use-mock-keychain",
+      `--user-data-dir=${profileDir}`,
+      "--disable-features=LockProfileCookieDatabase,VizDisplayCompositor",
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-gpu",
+      "--disable-dev-shm-usage",
+      "--proxy-server=direct://",
+      "--proxy-bypass-list=*",
     ],
   });
 

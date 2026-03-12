@@ -8,9 +8,11 @@ config();
 const APP_ROOT = path.resolve(__dirname, "..");
 
 export function getCredsPath(): string {
-  return process.env.CREDS_PATH || path.join(APP_ROOT, "creds.json");
+  return path.resolve(
+    process.env.CREDS_PATH || path.join(APP_ROOT, "creds.json"),
+  );
 }
 
 export function getDataDir(): string {
-  return process.env.DATA_DIR || path.join(APP_ROOT, "data");
+  return path.resolve(process.env.DATA_DIR || path.join(APP_ROOT, "data"));
 }
