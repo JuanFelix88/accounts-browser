@@ -3,3 +3,4 @@ dist/
 data/
 .env
 *.exe
+creds.json
