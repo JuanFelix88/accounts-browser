@@ -2,6 +2,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { connect } from "puppeteer-real-browser";
 import { getDataDir } from "./config";
+import { SessionStore } from "./session-store";
 import type { Credential } from "./types";
 
 export async function launchBrowser(
@@ -17,14 +18,13 @@ export async function launchBrowser(
     fs.mkdirSync(profileDir, { recursive: true });
   }
 
+  const session = new SessionStore(profileDir);
+
   const { browser, page } = await connect({
     headless: false,
-    customConfig: {
-      userDataDir: profileDir,
-    },
+    customConfig: {},
     turnstile: true,
     args: [
-      `--user-data-dir=${profileDir}`,
       "--disable-features=LockProfileCookieDatabase,VizDisplayCompositor",
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -35,21 +35,35 @@ export async function launchBrowser(
     ],
   });
 
-  // Set viewport to match the window size
-  const session = await page.createCDPSession();
-  const { windowId } = await session.send("Browser.getWindowForTarget");
-  const { bounds } = await session.send("Browser.getWindowBounds", {
-    windowId,
-  });
-  if (bounds.width && bounds.height) {
-    await page.setViewport({
-      width: bounds.width,
-      height: bounds.height - 100, // account for browser chrome
-      deviceScaleFactor: 1,
-    });
+  // Restore cookies from our cache before the user navigates
+  await session.restore(page);
+
+  // Navigate to the last URL the user was on
+  const lastUrl = session.getLastUrl();
+  if (lastUrl) {
+    await page.goto(lastUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
+    await session.restoreLocalStorage(page);
   }
 
-  browser.on("disconnected", () => {
+  session.attach(page);
+  session.startAutoSave(page);
+
+  // Also hook new tabs/pages opened by the user
+  browser.on("targetcreated", async (target) => {
+    if (target.type() === "page") {
+      const newPage = await target.page();
+      if (newPage) {
+        await session.restore(newPage);
+        session.attach(newPage);
+      }
+    }
+  });
+
+  // Let Chrome manage the viewport size so it resizes with the window
+  await page.setViewport(null);
+
+  browser.on("disconnected", async () => {
+    await session.finalSave();
     onDisconnected?.();
   });
 }

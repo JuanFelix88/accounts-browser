@@ -149,14 +149,19 @@ export class App {
     return `{${color}-fg}${icon} ${status}{/${color}-fg}`;
   }
 
+  private hasSession(credId: string): boolean {
+    const sessionFile = path.join(getDataDir(), credId, "session-data.json");
+    return fs.existsSync(sessionFile);
+  }
+
   private refresh(): void {
     const creds = this.store.getAll();
     const rows: string[][] = [
-      ["#", "Label", "Username", "Status", "Expires", "Created"],
+      ["#", "Label", "Username", "Status", "Session", "Expires", "Created"],
     ];
 
     if (creds.length === 0) {
-      rows.push(["", "", "No credentials. Press F1 to add.", "", "", ""]);
+      rows.push(["", "", "No credentials. Press F1 to add.", "", "", "", ""]);
     } else {
       creds.forEach((cred, i) => {
         const expires = cred.expiresAt
@@ -164,6 +169,9 @@ export class App {
             ? `{red-fg}${new Date(cred.expiresAt).toLocaleDateString("en-US")}{/red-fg}`
             : new Date(cred.expiresAt).toLocaleDateString("en-US")
           : "{gray-fg}—{/gray-fg}";
+        const session = this.hasSession(cred.id)
+          ? "{green-fg}●{/green-fg}"
+          : "{gray-fg}○{/gray-fg}";
         rows.push([
           String(i + 1),
           this.runningBrowsers.has(cred.id)
@@ -171,6 +179,7 @@ export class App {
             : cred.label,
           cred.username,
           this.formatStatus(cred.status),
+          session,
           expires,
           new Date(cred.createdAt).toLocaleDateString("en-US"),
         ]);
@@ -1069,20 +1078,31 @@ export class App {
           const credsPath = getCredsPath();
           const dataDir = getDataDir();
 
-          let totalFiles = 0;
-          if (fs.existsSync(credsPath)) totalFiles++;
+          // Collect only the portable files: creds.json + session-data.json per profile
+          const filesToExport: { absPath: string; zipName: string }[] = [];
+          if (fs.existsSync(credsPath)) {
+            filesToExport.push({ absPath: credsPath, zipName: "creds.json" });
+          }
           if (fs.existsSync(dataDir)) {
-            const count = (dir: string): number => {
-              let n = 0;
-              for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
-                n += ent.isDirectory() ? count(path.join(dir, ent.name)) : 1;
+            for (const ent of fs.readdirSync(dataDir, {
+              withFileTypes: true,
+            })) {
+              if (!ent.isDirectory()) continue;
+              const sessionFile = path.join(
+                dataDir,
+                ent.name,
+                "session-data.json",
+              );
+              if (fs.existsSync(sessionFile)) {
+                filesToExport.push({
+                  absPath: sessionFile,
+                  zipName: `data/${ent.name}/session-data.json`,
+                });
               }
-              return n;
-            };
-            totalFiles += count(dataDir);
+            }
           }
 
-          if (totalFiles === 0) {
+          if (filesToExport.length === 0) {
             progress.close();
             this.modalOpen = false;
             this.table.focus();
@@ -1090,6 +1110,7 @@ export class App {
             return;
           }
 
+          const totalFiles = filesToExport.length;
           progress.update(0, "Creating archive...");
 
           const output = fs.createWriteStream(filePath);
@@ -1111,11 +1132,8 @@ export class App {
 
             archive.pipe(output);
 
-            if (fs.existsSync(credsPath)) {
-              archive.file(credsPath, { name: "creds.json" });
-            }
-            if (fs.existsSync(dataDir)) {
-              archive.directory(dataDir, "data");
+            for (const f of filesToExport) {
+              archive.file(f.absPath, { name: f.zipName });
             }
 
             archive.finalize();
@@ -1223,26 +1241,33 @@ export class App {
 
       const credsPath = getCredsPath();
       const dataDir = getDataDir();
+
+      // Only import portable files: creds.json and session-data.json per profile
+      const importable = zipEntries.filter(
+        (e) =>
+          !e.isDirectory &&
+          (e.entryName === "creds.json" ||
+            (e.entryName.startsWith("data/") &&
+              e.entryName.endsWith("/session-data.json"))),
+      );
+      const importTotal = importable.length;
       let processed = 0;
 
-      for (const entry of zipEntries) {
+      for (const entry of importable) {
         processed++;
         progress.update(
-          Math.round((processed / total) * 100),
-          `Extracting... (${processed}/${total})`,
+          Math.round((processed / importTotal) * 100),
+          `Extracting... (${processed}/${importTotal})`,
         );
-
-        if (entry.isDirectory) continue;
 
         if (entry.entryName === "creds.json") {
           fs.writeFileSync(credsPath, entry.getData());
-        } else if (entry.entryName.startsWith("data/")) {
-          const rel = entry.entryName.substring(5);
-          if (rel) {
-            const target = path.join(dataDir, rel);
-            fs.mkdirSync(path.dirname(target), { recursive: true });
-            fs.writeFileSync(target, entry.getData());
-          }
+        } else {
+          // data/<uuid>/session-data.json
+          const rel = entry.entryName.substring(5); // strip "data/"
+          const target = path.join(dataDir, rel);
+          fs.mkdirSync(path.dirname(target), { recursive: true });
+          fs.writeFileSync(target, entry.getData());
         }
       }
 
