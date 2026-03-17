@@ -20,20 +20,33 @@ export async function launchBrowser(
 
   const session = new SessionStore(profileDir);
 
-  const { browser, page } = await connect({
-    headless: false,
+  const connectArgs = {
+    headless: false as const,
     customConfig: {},
     turnstile: true,
     args: [
       "--disable-features=LockProfileCookieDatabase,VizDisplayCompositor",
       "--no-sandbox",
       "--disable-setuid-sandbox",
-      "--disable-gpu",
-      "--disable-dev-shm-usage",
-      "--proxy-server=direct://",
-      "--proxy-bypass-list=*",
+      "--no-proxy-server",
     ],
-  });
+  };
+
+  type ConnectResult = Awaited<ReturnType<typeof connect>>;
+  let result: ConnectResult | undefined;
+  const MAX_RETRIES = 3;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      result = await connect(connectArgs);
+      break;
+    } catch (err) {
+      const isTargetClose =
+        err instanceof Error && err.constructor.name === "TargetCloseError";
+      if (attempt === MAX_RETRIES || !isTargetClose) throw err;
+      await new Promise((r) => setTimeout(r, 800 * attempt));
+    }
+  }
+  const { browser, page } = result!;
 
   // Restore cookies from our cache before the user navigates
   await session.restore(page);
