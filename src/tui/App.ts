@@ -157,11 +157,29 @@ export class App {
   private refresh(): void {
     const creds = this.store.getAll();
     const rows: string[][] = [
-      ["#", "Label", "Username", "Status", "Session", "Expires", "Created"],
+      [
+        "#",
+        "Label",
+        "Username",
+        "Status",
+        "Session",
+        "Expires",
+        "Expires In",
+        "Created",
+      ],
     ];
 
     if (creds.length === 0) {
-      rows.push(["", "", "No credentials. Press F1 to add.", "", "", "", ""]);
+      rows.push([
+        "",
+        "",
+        "No credentials. Press F1 to add.",
+        "",
+        "",
+        "",
+        "",
+        "",
+      ]);
     } else {
       creds.forEach((cred, i) => {
         const expires = cred.expiresAt
@@ -169,6 +187,22 @@ export class App {
             ? `{red-fg}${new Date(cred.expiresAt).toLocaleDateString("en-US")}{/red-fg}`
             : new Date(cred.expiresAt).toLocaleDateString("en-US")
           : "{gray-fg}—{/gray-fg}";
+
+        let expiresIn = "{gray-fg}—{/gray-fg}";
+        if (cred.expiresAt) {
+          const days = Math.ceil(
+            (new Date(cred.expiresAt).getTime() - Date.now()) /
+              (1000 * 60 * 60 * 24),
+          );
+          if (days < 0) {
+            expiresIn = `{red-fg}${days}d{/red-fg}`;
+          } else if (days <= 30) {
+            expiresIn = `{yellow-fg}${days}d{/yellow-fg}`;
+          } else {
+            expiresIn = `{green-fg}${days}d{/green-fg}`;
+          }
+        }
+
         const session = this.hasSession(cred.id)
           ? "{green-fg}●{/green-fg}"
           : "{gray-fg}○{/gray-fg}";
@@ -181,6 +215,7 @@ export class App {
           this.formatStatus(cred.status),
           session,
           expires,
+          expiresIn,
           new Date(cred.createdAt).toLocaleDateString("en-US"),
         ]);
       });
